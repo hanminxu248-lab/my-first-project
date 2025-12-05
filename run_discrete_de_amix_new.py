@@ -168,13 +168,6 @@ class AMixEncoder(nn.Module):
         x = self.encoder_layers(x)
         return x
 
-
-    def get_full_hidden_states(self, input_ids: torch.Tensor) -> torch.Tensor:
-        """Return full sequence hidden states (for model-guided mutation)."""
-        x = self.embedding(input_ids.to(self.embedding.weight.device))
-        x = self.encoder_layers(x)
-        return x
-
 # -------------------- Decoder / Oracle --------------------
 class AttentionPool1D(nn.Module):
     def __init__(self, hidden_dim):
