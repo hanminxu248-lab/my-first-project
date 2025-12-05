@@ -322,15 +322,53 @@ def main():
     trainer.fit(module, train_dataloaders=dm.train_dataloader(), val_dataloaders=dm.val_dataloader())
 
     # Save combined checkpoint compatible with inference loader
+    # Format includes encoder_state_dict, regressor_state_dict, and meta field
     out_path = os.path.join(ckpt_dir, f"AMix-dec_{module.dec_hidden_dim}-{args.dataset_name}.pt")
     combined = {
         "encoder_state_dict": module.encoder.state_dict(),
         "regressor_state_dict": module.regressor.state_dict(),
-        "meta": {"dec_hidden_dim": module.dec_hidden_dim, "encoder_hidden_dim": module.encoder.hidden_dim}
+        "meta": {
+            "dec_hidden_dim": module.dec_hidden_dim,
+            "encoder_hidden_dim": module.encoder.hidden_dim,
+            "pooling": "cls",  # Document that CLS pooling is used (position 0)
+            "vocab_size": module.encoder.vocab_size,
+            "num_layers": module.encoder.num_layers,
+        }
     }
     torch.save(combined, out_path)
     logging.info(f"[Saved] Combined state saved to {out_path}")
+    logging.info(f"[Saved] Checkpoint meta: {combined['meta']}")
+
+
+def smoke_test():
+    """
+    Basic smoke test to verify the training module imports and classes work.
+    """
+    logging.info("Running train_decoder_amix_fixed.py smoke test...")
+    
+    # Test AMixEncoder initialization
+    encoder = AMixEncoder(device="cpu")
+    logging.info(f"AMixEncoder initialized with hidden_dim={encoder.hidden_dim}")
+    
+    # Test forward pass
+    test_input = torch.tensor([[1, 2, 3, 4, 5]], dtype=torch.long)
+    output = encoder(test_input)
+    assert output.shape == (1, encoder.hidden_dim), f"Unexpected output shape: {output.shape}"
+    logging.info(f"AMixEncoder forward pass: input shape {test_input.shape} -> output shape {output.shape}")
+    
+    # Test DecoderRegressor
+    regressor = DecoderRegressor(in_dim=encoder.hidden_dim)
+    pred = regressor(output)
+    assert pred.shape == (1, 1), f"Unexpected prediction shape: {pred.shape}"
+    logging.info(f"DecoderRegressor forward pass: output shape {pred.shape}")
+    
+    logging.info("Smoke test completed successfully!")
+    return True
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "--smoke_test":
+        smoke_test()
+    else:
+        main()
