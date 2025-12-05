@@ -154,12 +154,16 @@ class AMixEncoder(nn.Module):
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         """
         Forward pass with CLS pooling.
-        CLS pooling takes the first token (position 0) hidden state as the pooled representation.
+        
+        CLS pooling extracts the first token's hidden state (position 0) as a sequence-level
+        representation. After transformer encoding, position 0 has attended to all other
+        positions through self-attention, making it a suitable summary of the sequence.
         This matches the training code in train_decoder_amix_fixed.py.
         """
         x = self.embedding(input_ids.to(self.embedding.weight.device))
         x = self.encoder_layers(x)
-        # CLS pooling: use position 0 as the pooled representation (consistent with training)
+        # CLS pooling: position 0 hidden state serves as sequence-level representation
+        # after attention processing has allowed it to aggregate information from all positions
         return x[:, 0, :]
 
     def get_full_hidden_states(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -545,6 +549,12 @@ class DiscreteDirectedEvolutionBeam:
 
         return masked_variants, masked_positions
 
+    def _get_hidden_dim(self) -> int:
+        """Get the hidden dimension from fitness predictor encoder, with fallback."""
+        if hasattr(self.fitness_predictor, 'encoder') and self.fitness_predictor.encoder:
+            return self.fitness_predictor.encoder.hidden_dim
+        return 1680  # Default fallback value
+
     def _mutate_random(self, masked_seq: str) -> str:
         """
         Random mutation: replace mask tokens with random amino acids.
@@ -574,13 +584,14 @@ class DiscreteDirectedEvolutionBeam:
             Tuple of (mutated_seqs, mutants, pooled_tensor)
         """
         all_candidates = []
+        hidden_dim = self._get_hidden_dim()
         
         for mv, pos in zip(masked_variants, masked_positions):
             if self.use_random_mutation:
                 # Random mutation: replace mask tokens with random amino acids
                 mutated = self._mutate_random(mv)
                 # Create dummy pooled embedding
-                dummy_pooled = torch.zeros(self.fitness_predictor.encoder.hidden_dim if hasattr(self.fitness_predictor, 'encoder') and self.fitness_predictor.encoder else 1680)
+                dummy_pooled = torch.zeros(hidden_dim)
                 all_candidates.append((mutated, 0.0, dummy_pooled))
             else:
                 # Model-guided mutation using beam search
@@ -592,12 +603,12 @@ class DiscreteDirectedEvolutionBeam:
                 except Exception as e:
                     logging.warning(f"Beam fill failed: {e}, falling back to random mutation")
                     mutated = self._mutate_random(mv)
-                    dummy_pooled = torch.zeros(self.fitness_predictor.encoder.hidden_dim if hasattr(self.fitness_predictor, 'encoder') and self.fitness_predictor.encoder else 1680)
+                    dummy_pooled = torch.zeros(hidden_dim)
                     candidates = [(mutated, 0.0, dummy_pooled)]
                 all_candidates.extend(candidates[:self.max_candidates_per_variant])
         
         if not all_candidates:
-            return [], [], torch.zeros((0, 1680))
+            return [], [], torch.zeros((0, hidden_dim))
         
         mutated_seqs = [c[0] for c in all_candidates]
         pooled_tensor = torch.stack([c[2] for c in all_candidates], dim=0)
