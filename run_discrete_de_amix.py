@@ -34,7 +34,7 @@ class AMixEncoder(nn.Module):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.ckpt_path = ckpt_path
 
-        # -------- 配置加载（兼容 JSON/YAML/无配置）--------
+        # -------- Load configuration (supports JSON/YAML/no config) --------
         self.config = self._load_config(config_path)
         if self.config is None:
             print(f"[Warning] config not found or invalid at {config_path}, using defaults.")
@@ -44,7 +44,7 @@ class AMixEncoder(nn.Module):
         vocab_size = self.config.get("vocab_size", 30)
         num_layers = self.config.get("num_layers", 12)
 
-        # -------- 模型结构 --------
+        # -------- Model architecture --------
         self.embedding = nn.Embedding(vocab_size, hidden_dim)
         self.encoder_layers = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(d_model=hidden_dim, nhead=8, batch_first=True),
@@ -53,7 +53,7 @@ class AMixEncoder(nn.Module):
 
         self.to(self.device)
 
-        # -------- 加载 checkpoint --------
+        # -------- Load checkpoint --------
         if ckpt_path and os.path.exists(ckpt_path):
             try:
                 state_dict = torch.load(ckpt_path, map_location=self.device)
@@ -97,7 +97,7 @@ class AMixMutationModel(nn.Module):
         super().__init__()
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         
-        # -------- 配置加载 --------
+        # -------- Load configuration --------
         self.config = self._load_config(config_path)
         if self.config is None:
             print(f"[Warning] config not found or invalid at {config_path}, using defaults.")
@@ -107,33 +107,36 @@ class AMixMutationModel(nn.Module):
         vocab_size = self.config.get("vocab_size", 30)
         num_layers = self.config.get("num_layers", 12)
         
-        # -------- AMix 氨基酸映射 --------
+        # -------- AMix amino acid mapping --------
         self.amino2id = {a: i + 1 for i, a in enumerate("ACDEFGHIKLMNPQRSTVWY")}
         self.id2amino = {i: a for a, i in self.amino2id.items()}
         self.pad_id = 0
         self.mask_token = "<mask>"
-        self.mask_id = vocab_size  # 使用 vocab_size 作为 mask token ID
+        self.mask_id = vocab_size  # Use vocab_size as mask token ID
         
-        # -------- 模型结构 --------
-        # vocab_size + 1 to include mask token
-        self.embedding = nn.Embedding(vocab_size + 1, hidden_dim, padding_idx=self.pad_id)
+        # -------- Model architecture --------
+        # Total vocabulary: amino acids (1-20) + pad (0) + mask (vocab_size)
+        self.total_vocab_size = vocab_size + 1
+        self.embedding = nn.Embedding(self.total_vocab_size, hidden_dim, padding_idx=self.pad_id)
         self.encoder_layers = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(d_model=hidden_dim, nhead=8, batch_first=True),
             num_layers=num_layers
         )
         
         # Linear layer for logits (tied to embedding weights)
-        self.lm_head = nn.Linear(hidden_dim, vocab_size + 1, bias=False)
+        self.lm_head = nn.Linear(hidden_dim, self.total_vocab_size, bias=False)
         
         self.to(self.device)
         
-        # -------- 加载 checkpoint --------
+        # -------- Load checkpoint --------
         if ckpt_path and os.path.exists(ckpt_path):
             try:
-                state_dict = torch.load(ckpt_path, map_location=self.device)
-                if "state_dict" in state_dict:
-                    state_dict = {k.replace("model.", ""): v for k, v in state_dict["state_dict"].items()}
-                self.load_state_dict(state_dict, strict=False)
+                checkpoint = torch.load(ckpt_path, map_location=self.device)
+                if "state_dict" in checkpoint:
+                    processed_state_dict = {k.replace("model.", ""): v for k, v in checkpoint["state_dict"].items()}
+                else:
+                    processed_state_dict = checkpoint
+                self.load_state_dict(processed_state_dict, strict=False)
                 print(f">> Loaded AMixMutationModel weights from {ckpt_path}")
             except Exception as e:
                 print(f"[Warning] Failed to load checkpoint: {e}")
@@ -299,13 +302,13 @@ class AMixFitnessWrapper:
         out = out.detach().cpu().numpy().reshape(len(seqs), -1)
         return out[:, 0] if out.shape[1] == 1 else out
 
-    # 让接口和 DE 框架兼容
+    # Make interface compatible with DE framework
     predict_fitness = predict
     infer_fitness = predict
     __call__ = predict
 
 # =============================================
-# 初始化模块
+# Initialization functions
 # =============================================
 def initialize_mutation_model(args, device):
     # Use AMixMutationModel instead of ESM2 for compatibility
@@ -362,7 +365,7 @@ def initialize_fitness_predictor(args, device):
     return AMixFitnessWrapper(amix_module, device=device)
 
 # =============================================
-# CSV 结果保存
+# Save results to CSV
 # =============================================
 def save_results(wt_seqs, mutants, score, valid_score, output_path):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -371,7 +374,7 @@ def save_results(wt_seqs, mutants, score, valid_score, output_path):
     df.to_csv(output_path, index=False)
 
 # =============================================
-# 主逻辑
+# Main logic
 # =============================================
 def main(args):
     set_seed(args.seed) if args.set_seed_only else enable_full_deterministic(args.seed)
@@ -420,7 +423,7 @@ def main(args):
     print(f">> Results saved to {filepath}")
 
 # =============================================
-# 参数解析
+# Argument parsing
 # =============================================
 def parse_args():
     parser = argparse.ArgumentParser(description="Run Discrete Directed Evolution with AMix decoder checkpoint")
