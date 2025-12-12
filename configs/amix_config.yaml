@@ -1,0 +1,25 @@
+# AMix ProfileBFN Model Configuration
+# This configuration aligns with the ProfileBFN model specifications
+# Based on facebook/esm2_t30_150M_UR50D architecture
+
+# Model architecture parameters
+hidden_dim: 1680                # Hidden dimension size (d_model)
+num_layers: 48                  # Number of transformer encoder layers
+num_attention_heads: 40         # Number of attention heads (nhead)
+intermediate_size: 6720         # Feedforward network hidden dimension (dim_feedforward)
+vocab_size: 30                  # Vocabulary size (20 amino acids + special tokens)
+
+# Training parameters (optional, can be overridden by command line)
+batch_size: 128
+learning_rate: 5.0e-5
+num_epochs: 10
+
+# Model features
+gradient_checkpointing: false   # Enable gradient checkpointing for large models
+token_dropout: false            # Token dropout during training
+
+# BFN/Diffusion parameters (for future use)
+num_diffusion_timesteps: 100
+beta1: 1.0
+beta_time_order: 2.0
+infer_start: 0.2

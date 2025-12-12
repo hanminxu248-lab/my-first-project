@@ -91,10 +91,16 @@ class AMixEncoder(nn.Module):
         self.vocab_size = int(config.get("vocab_size", VOCAB_SIZE))
         self.num_layers = int(config.get("num_layers", 12))
         self.nhead = int(config.get("nhead", 8))
+        self.intermediate_size = int(config.get("intermediate_size", 6720))
 
         # Embedding and transformer encoder
         self.embedding = nn.Embedding(self.vocab_size, self.hidden_dim, padding_idx=PAD_ID)
-        encoder_layer = nn.TransformerEncoderLayer(d_model=self.hidden_dim, nhead=self.nhead, batch_first=True)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=self.hidden_dim, 
+            nhead=self.nhead, 
+            dim_feedforward=self.intermediate_size,
+            batch_first=True
+        )
         self.encoder_layers = nn.TransformerEncoder(encoder_layer, num_layers=self.num_layers)
 
         # Track what keys were loaded for debugging
@@ -139,6 +145,10 @@ class AMixEncoder(nn.Module):
                 logging.warning(f"[AMixEncoder] failed to load ckpt {ckpt_path}: {e}")
 
         self.to(self.device)
+
+        # Log loaded configuration
+        logging.info(f"[AMixEncoder] Configuration: hidden_dim={self.hidden_dim}, num_layers={self.num_layers}, "
+                    f"nhead={self.nhead}, intermediate_size={self.intermediate_size}, vocab_size={self.vocab_size}")
 
     def forward(self, input_ids: torch.Tensor):
         """
@@ -274,6 +284,13 @@ def main():
     else:
         logging.info("[Main] AMixEncoder did not detect loaded checkpoint keys (embedding/transformer). Check ckpt content if this is unexpected.")
 
+    # Validate checkpoint dimension compatibility if dec_hidden_dim is specified
+    if args.dec_hidden_dim is not None and args.dec_hidden_dim != encoder.hidden_dim:
+        logging.warning(f"[Main] ⚠️  Dimension mismatch: --dec_hidden_dim={args.dec_hidden_dim} but encoder.hidden_dim={encoder.hidden_dim}. "
+                       f"This may cause runtime errors. Consider using --dec_hidden_dim={encoder.hidden_dim} or updating config.")
+    elif args.dec_hidden_dim is None:
+        logging.info(f"[Main] Using encoder.hidden_dim={encoder.hidden_dim} as dec_hidden_dim (not specified via --dec_hidden_dim)")
+
     module = AMixDecoderTrainer(
         encoder,
         dec_hidden_dim=args.dec_hidden_dim,
@@ -326,10 +343,18 @@ def main():
     combined = {
         "encoder_state_dict": module.encoder.state_dict(),
         "regressor_state_dict": module.regressor.state_dict(),
-        "meta": {"dec_hidden_dim": module.dec_hidden_dim, "encoder_hidden_dim": module.encoder.hidden_dim}
+        "meta": {
+            "dec_hidden_dim": module.dec_hidden_dim,
+            "encoder_hidden_dim": module.encoder.hidden_dim,
+            "num_layers": module.encoder.num_layers,
+            "nhead": module.encoder.nhead,
+            "intermediate_size": module.encoder.intermediate_size,
+            "vocab_size": module.encoder.vocab_size
+        }
     }
     torch.save(combined, out_path)
     logging.info(f"[Saved] Combined state saved to {out_path}")
+    logging.info(f"[Saved] Checkpoint metadata: {combined['meta']}")
 
 
 if __name__ == "__main__":

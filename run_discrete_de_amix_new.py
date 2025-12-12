@@ -52,9 +52,15 @@ class AMixEncoder(nn.Module):
         self.vocab_size = int(config.get("vocab_size", 30))
         self.num_layers = int(config.get("num_layers", 48))
         self.nhead = int(config.get("nhead", 40))
+        self.intermediate_size = int(config.get("intermediate_size", 6720))
 
         self.embedding = nn.Embedding(self.vocab_size, self.hidden_dim, padding_idx=0)
-        encoder_layer = nn.TransformerEncoderLayer(d_model=self.hidden_dim, nhead=self.nhead, batch_first=True)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=self.hidden_dim, 
+            nhead=self.nhead, 
+            dim_feedforward=self.intermediate_size,
+            batch_first=True
+        )
         self.encoder_layers = nn.TransformerEncoder(encoder_layer, num_layers=self.num_layers)
         self.cls_token = nn.Parameter(torch.zeros(1, 1, self.hidden_dim))
 
@@ -74,6 +80,8 @@ class AMixEncoder(nn.Module):
                 logging.warning(f"[AMixEncoder] failed to load ckpt: {e}")
 
         self.to(self.device)
+        logging.info(f"[AMixEncoder] Configuration: hidden_dim={self.hidden_dim}, num_layers={self.num_layers}, "
+                    f"nhead={self.nhead}, intermediate_size={self.intermediate_size}, vocab_size={self.vocab_size}")
 
     def forward(self, input_ids):
         x = self.embedding(input_ids)
@@ -164,6 +172,7 @@ class AmixLMWrapper(nn.Module):
         self.vocab_size = int(config.get("vocab_size",30))
         self.num_layers = int(config.get("num_layers",48))
         self.nhead = int(config.get("nhead",40))
+        self.intermediate_size = int(config.get("intermediate_size",6720))
 
         self.amino2id = {a:i+1 for i,a in enumerate("ACDEFGHIKLMNPQRSTVWY")}
         self.id2amino = {i:a for a,i in self.amino2id.items()}
@@ -171,7 +180,12 @@ class AmixLMWrapper(nn.Module):
         self.mask_token = "*"
         self.mask_id = self.vocab_size
         self.embedding = nn.Embedding(self.vocab_size+1,self.hidden_dim,padding_idx=self.pad_id)
-        encoder_layer = nn.TransformerEncoderLayer(d_model=self.hidden_dim,nhead=self.nhead,batch_first=True)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=self.hidden_dim,
+            nhead=self.nhead,
+            dim_feedforward=self.intermediate_size,
+            batch_first=True
+        )
         self.encoder_layers = nn.TransformerEncoder(encoder_layer,num_layers=self.num_layers)
 
         if ckpt_path and os.path.exists(ckpt_path):
@@ -187,6 +201,8 @@ class AmixLMWrapper(nn.Module):
                 logging.warning(f"[LM] ckpt load failed: {e}")
         self.to(self.device)
         self.eval()
+        logging.info(f"[AmixLMWrapper] Configuration: hidden_dim={self.hidden_dim}, num_layers={self.num_layers}, "
+                    f"nhead={self.nhead}, intermediate_size={self.intermediate_size}, vocab_size={self.vocab_size}")
 
     def tokenize(self,sequences):
         max_len = max(len(s) for s in sequences)
@@ -357,6 +373,18 @@ def build_oracle_and_load(decoder_ckpt_path, amix_encoder_ckpt, amix_encoder_con
     reg = DecoderRegressor(in_dim=encoder_obj.hidden_dim)
     if os.path.exists(decoder_ckpt_path):
         ck = torch.load(decoder_ckpt_path,map_location="cpu")
+        
+        # Validate dimension compatibility
+        if "meta" in ck:
+            meta = ck["meta"]
+            expected_dim = meta.get("encoder_hidden_dim", meta.get("dec_hidden_dim"))
+            if expected_dim and expected_dim != encoder_obj.hidden_dim:
+                logging.warning(f"[Oracle] ⚠️  Dimension mismatch: checkpoint expects hidden_dim={expected_dim} "
+                              f"but current encoder has hidden_dim={encoder_obj.hidden_dim}. "
+                              f"This may cause errors. Please check your config file.")
+            else:
+                logging.info(f"[Oracle] ✓ Dimension compatibility validated: hidden_dim={encoder_obj.hidden_dim}")
+        
         if "regressor_state_dict" in ck:
             reg.load_state_dict(ck["regressor_state_dict"],strict=False)
         elif "state_dict" in ck:
