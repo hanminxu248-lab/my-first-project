@@ -26,6 +26,35 @@ from de.samplers.maskers import RandomMasker2, ImportanceMasker2
 from de.predictors.oracle import ESM1b_Landscape
 
 # =============================================
+# Utility functions
+# =============================================
+def load_model_config(path):
+    """Load model configuration from JSON or YAML file."""
+    if path is None or not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r") as f:
+            if path.endswith(".json"):
+                import json
+                return json.load(f)
+            return yaml.safe_load(f)
+    except Exception as e:
+        print(f"[Error] load_config failed: {e}")
+        return None
+
+# =============================================
+# Output classes
+# =============================================
+class AMixOutput:
+    """
+    Output class compatible with ESM2's MaskedLMOutput.
+    Contains logits and hidden_states attributes.
+    """
+    def __init__(self, logits, hidden_states):
+        self.logits = logits
+        self.hidden_states = [hidden_states]  # List format like ESM2
+
+# =============================================
 # 🧬 AMix Encoder
 # =============================================
 class AMixEncoder(nn.Module):
@@ -35,7 +64,7 @@ class AMixEncoder(nn.Module):
         self.ckpt_path = ckpt_path
 
         # -------- Load configuration (supports JSON/YAML/no config) --------
-        self.config = self._load_config(config_path)
+        self.config = load_model_config(config_path)
         if self.config is None:
             print(f"[Warning] config not found or invalid at {config_path}, using defaults.")
             self.config = {"hidden_dim": 1280, "num_layers": 12, "vocab_size": 30, "dropout": 0.1}
@@ -66,19 +95,6 @@ class AMixEncoder(nn.Module):
         else:
             print(f"[Warning] Encoder checkpoint not found: {ckpt_path}, using random init.")
 
-    def _load_config(self, path):
-        if path is None or not os.path.exists(path):
-            return None
-        try:
-            with open(path, "r") as f:
-                if path.endswith(".json"):
-                    import json
-                    return json.load(f)
-                return yaml.safe_load(f)
-        except Exception as e:
-            print(f"[Error] load_config failed: {e}")
-            return None
-
     def forward(self, input_ids):
         x = self.embedding(input_ids)
         x = self.encoder_layers(x)
@@ -98,7 +114,7 @@ class AMixMutationModel(nn.Module):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         
         # -------- Load configuration --------
-        self.config = self._load_config(config_path)
+        self.config = load_model_config(config_path)
         if self.config is None:
             print(f"[Warning] config not found or invalid at {config_path}, using defaults.")
             self.config = {"hidden_dim": 1280, "num_layers": 12, "vocab_size": 30, "dropout": 0.1}
@@ -145,19 +161,6 @@ class AMixMutationModel(nn.Module):
         
         # Make self act as tokenizer for compatibility
         self.tokenizer = self
-    
-    def _load_config(self, path):
-        if path is None or not os.path.exists(path):
-            return None
-        try:
-            with open(path, "r") as f:
-                if path.endswith(".json"):
-                    import json
-                    return json.load(f)
-                return yaml.safe_load(f)
-        except Exception as e:
-            print(f"[Error] load_config failed: {e}")
-            return None
     
     def tokenize(self, inputs: List[str]):
         """
@@ -236,11 +239,6 @@ class AMixMutationModel(nn.Module):
         logits = self.lm_head(hidden_states)  # [B, L, V]
         
         # Return object with logits and hidden_states attributes (like MaskedLMOutput)
-        class AMixOutput:
-            def __init__(self, logits, hidden_states):
-                self.logits = logits
-                self.hidden_states = [hidden_states]  # List format like ESM2
-        
         return AMixOutput(logits, hidden_states)
 
 # =============================================
