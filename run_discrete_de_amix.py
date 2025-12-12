@@ -68,15 +68,23 @@ class AMixEncoder(nn.Module):
         if self.config is None:
             print(f"[Warning] config not found or invalid at {config_path}, using defaults.")
             self.config = {"hidden_dim": 1280, "num_layers": 12, "vocab_size": 30, "dropout": 0.1}
+        else:
+            # Handle nested config structure from AMix
+            if 'model' in self.config and 'bfn' in self.config['model']:
+                bfn_config = self.config['model']['bfn']
+                if 'net' in bfn_config and 'config' in bfn_config['net']:
+                    self.config = bfn_config['net']['config']
 
-        hidden_dim = self.config.get("hidden_dim", 1280)
+        # Get dimensions (handle both naming conventions)
+        hidden_dim = self.config.get("hidden_size", self.config.get("hidden_dim", 1280))
         vocab_size = self.config.get("vocab_size", 30)
-        num_layers = self.config.get("num_layers", 12)
+        num_layers = self.config.get("num_hidden_layers", self.config.get("num_layers", 12))
+        num_heads = self.config.get("num_attention_heads", self.config.get("nhead", 8))
 
         # -------- Model architecture --------
         self.embedding = nn.Embedding(vocab_size, hidden_dim)
         self.encoder_layers = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(d_model=hidden_dim, nhead=8, batch_first=True),
+            nn.TransformerEncoderLayer(d_model=hidden_dim, nhead=num_heads, batch_first=True),
             num_layers=num_layers
         )
 
@@ -118,10 +126,20 @@ class AMixMutationModel(nn.Module):
         if self.config is None:
             print(f"[Warning] config not found or invalid at {config_path}, using defaults.")
             self.config = {"hidden_dim": 1280, "num_layers": 12, "vocab_size": 30, "dropout": 0.1}
+        else:
+            # Handle nested config structure from AMix
+            if 'model' in self.config and 'bfn' in self.config['model']:
+                bfn_config = self.config['model']['bfn']
+                if 'net' in bfn_config and 'config' in bfn_config['net']:
+                    self.config = bfn_config['net']['config']
         
-        hidden_dim = self.config.get("hidden_dim", 1280)
+        # Get dimensions from config (handle both naming conventions)
+        hidden_dim = self.config.get("hidden_size", self.config.get("hidden_dim", 1280))
         vocab_size = self.config.get("vocab_size", 30)
-        num_layers = self.config.get("num_layers", 12)
+        num_layers = self.config.get("num_hidden_layers", self.config.get("num_layers", 12))
+        num_heads = self.config.get("num_attention_heads", self.config.get("nhead", 8))
+        
+        print(f"[AMixMutationModel] Initializing with hidden_dim={hidden_dim}, num_layers={num_layers}, num_heads={num_heads}")
         
         # -------- AMix amino acid mapping --------
         self.amino2id = {a: i + 1 for i, a in enumerate("ACDEFGHIKLMNPQRSTVWY")}
@@ -140,7 +158,7 @@ class AMixMutationModel(nn.Module):
         self.total_vocab_size = vocab_size + 1
         self.embedding = nn.Embedding(self.total_vocab_size, hidden_dim, padding_idx=self.pad_id)
         self.encoder_layers = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(d_model=hidden_dim, nhead=8, batch_first=True),
+            nn.TransformerEncoderLayer(d_model=hidden_dim, nhead=num_heads, batch_first=True),
             num_layers=num_layers
         )
         
