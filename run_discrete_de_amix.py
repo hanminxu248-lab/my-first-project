@@ -161,19 +161,27 @@ class AMixMutationModel(nn.Module):
         Tokenize sequences to be compatible with ESM2 interface.
         Returns a dict with 'input_ids' and 'attention_mask'.
         """
-        max_len = max(len(s) for s in inputs) if inputs else 0
+        # First, we need to determine the max length in terms of tokens (not chars)
+        token_sequences = []
+        for seq in inputs:
+            ids = []
+            i = 0
+            while i < len(seq):
+                # Check if current position starts with mask token
+                if seq[i:i+len(self.mask_token)] == self.mask_token:
+                    ids.append(self.mask_id)
+                    i += len(self.mask_token)
+                else:
+                    ids.append(self.amino2id.get(seq[i], self.pad_id))
+                    i += 1
+            token_sequences.append(ids)
+        
+        max_len = max(len(ids) for ids in token_sequences) if token_sequences else 0
         input_ids = torch.full((len(inputs), max_len), fill_value=self.pad_id, 
                               dtype=torch.long, device=self.device)
         attention_mask = torch.zeros((len(inputs), max_len), dtype=torch.long, device=self.device)
         
-        for i, seq in enumerate(inputs):
-            ids = []
-            for ch in seq:
-                if ch == self.mask_token or ch == '<mask>':
-                    ids.append(self.mask_id)
-                else:
-                    ids.append(self.amino2id.get(ch, self.pad_id))
-            
+        for i, ids in enumerate(token_sequences):
             input_ids[i, :len(ids)] = torch.tensor(ids, dtype=torch.long, device=self.device)
             attention_mask[i, :len(ids)] = 1
         
