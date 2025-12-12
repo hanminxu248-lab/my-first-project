@@ -128,10 +128,15 @@ class AMixMutationModel(nn.Module):
         self.id2amino = {i: a for a, i in self.amino2id.items()}
         self.pad_id = 0
         self.mask_token = "<mask>"
-        self.mask_id = vocab_size  # Use vocab_size as mask token ID
+        # Vocabulary structure:
+        # - Position 0: padding token
+        # - Positions 1-20: amino acids (A, C, D, E, F, G, H, I, K, L, M, N, P, Q, R, S, T, V, W, Y)
+        # - Positions 21-29: reserved (from original vocab_size=30)
+        # - Position 30 (vocab_size): mask token
+        self.mask_id = vocab_size
         
         # -------- Model architecture --------
-        # Total vocabulary: amino acids (1-20) + pad (0) + mask (vocab_size)
+        # Total vocabulary size includes all positions from 0 to vocab_size (inclusive)
         self.total_vocab_size = vocab_size + 1
         self.embedding = nn.Embedding(self.total_vocab_size, hidden_dim, padding_idx=self.pad_id)
         self.encoder_layers = nn.TransformerEncoder(
@@ -167,6 +172,13 @@ class AMixMutationModel(nn.Module):
         Tokenize sequences to be compatible with ESM2 interface.
         Returns a dict with 'input_ids' and 'attention_mask'.
         """
+        if not inputs:
+            # Handle empty input list
+            return {
+                "input_ids": torch.empty((0, 0), dtype=torch.long, device=self.device),
+                "attention_mask": torch.empty((0, 0), dtype=torch.long, device=self.device)
+            }
+        
         # First, we need to determine the max length in terms of tokens (not chars)
         token_sequences = []
         for seq in inputs:
@@ -178,18 +190,24 @@ class AMixMutationModel(nn.Module):
                     ids.append(self.mask_id)
                     i += len(self.mask_token)
                 else:
+                    # Use pad_id for unknown amino acids (silent fallback for compatibility)
                     ids.append(self.amino2id.get(seq[i], self.pad_id))
                     i += 1
             token_sequences.append(ids)
         
-        max_len = max(len(ids) for ids in token_sequences) if token_sequences else 0
+        # Handle case where all sequences are empty
+        max_len = max((len(ids) for ids in token_sequences), default=0)
+        if max_len == 0:
+            max_len = 1  # Ensure at least 1 position for empty sequences
+        
         input_ids = torch.full((len(inputs), max_len), fill_value=self.pad_id, 
                               dtype=torch.long, device=self.device)
         attention_mask = torch.zeros((len(inputs), max_len), dtype=torch.long, device=self.device)
         
         for i, ids in enumerate(token_sequences):
-            input_ids[i, :len(ids)] = torch.tensor(ids, dtype=torch.long, device=self.device)
-            attention_mask[i, :len(ids)] = 1
+            if len(ids) > 0:
+                input_ids[i, :len(ids)] = torch.tensor(ids, dtype=torch.long, device=self.device)
+                attention_mask[i, :len(ids)] = 1
         
         # Return BatchEncoding-like dict
         return {
