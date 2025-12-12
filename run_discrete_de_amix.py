@@ -23,8 +23,36 @@ if repo_root not in sys.path:
 from de.common.utils import set_seed, enable_full_deterministic
 from de.directed_evolution import DiscreteDirectedEvolution2
 from de.samplers.maskers import RandomMasker2, ImportanceMasker2
-from de.samplers.models.esm import ESM2
 from de.predictors.oracle import ESM1b_Landscape
+
+# =============================================
+# Utility functions
+# =============================================
+def load_model_config(path):
+    """Load model configuration from JSON or YAML file."""
+    if path is None or not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r") as f:
+            if path.endswith(".json"):
+                import json
+                return json.load(f)
+            return yaml.safe_load(f)
+    except Exception as e:
+        print(f"[Error] load_config failed: {e}")
+        return None
+
+# =============================================
+# Output classes
+# =============================================
+class AMixOutput:
+    """
+    Output class compatible with ESM2's MaskedLMOutput.
+    Contains logits and hidden_states attributes.
+    """
+    def __init__(self, logits, hidden_states):
+        self.logits = logits
+        self.hidden_states = [hidden_states]  # List format like ESM2
 
 # =============================================
 # 🧬 AMix Encoder
@@ -35,26 +63,34 @@ class AMixEncoder(nn.Module):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.ckpt_path = ckpt_path
 
-        # -------- 配置加载（兼容 JSON/YAML/无配置）--------
-        self.config = self._load_config(config_path)
+        # -------- Load configuration (supports JSON/YAML/no config) --------
+        self.config = load_model_config(config_path)
         if self.config is None:
             print(f"[Warning] config not found or invalid at {config_path}, using defaults.")
             self.config = {"hidden_dim": 1280, "num_layers": 12, "vocab_size": 30, "dropout": 0.1}
+        else:
+            # Handle nested config structure from AMix
+            if 'model' in self.config and 'bfn' in self.config['model']:
+                bfn_config = self.config['model']['bfn']
+                if 'net' in bfn_config and 'config' in bfn_config['net']:
+                    self.config = bfn_config['net']['config']
 
-        hidden_dim = self.config.get("hidden_dim", 1280)
+        # Get dimensions (handle both naming conventions)
+        hidden_dim = self.config.get("hidden_size", self.config.get("hidden_dim", 1280))
         vocab_size = self.config.get("vocab_size", 30)
-        num_layers = self.config.get("num_layers", 12)
+        num_layers = self.config.get("num_hidden_layers", self.config.get("num_layers", 12))
+        num_heads = self.config.get("num_attention_heads", self.config.get("nhead", 8))
 
-        # -------- 模型结构 --------
+        # -------- Model architecture --------
         self.embedding = nn.Embedding(vocab_size, hidden_dim)
         self.encoder_layers = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(d_model=hidden_dim, nhead=8, batch_first=True),
+            nn.TransformerEncoderLayer(d_model=hidden_dim, nhead=num_heads, batch_first=True),
             num_layers=num_layers
         )
 
         self.to(self.device)
 
-        # -------- 加载 checkpoint --------
+        # -------- Load checkpoint --------
         if ckpt_path and os.path.exists(ckpt_path):
             try:
                 state_dict = torch.load(ckpt_path, map_location=self.device)
@@ -67,23 +103,179 @@ class AMixEncoder(nn.Module):
         else:
             print(f"[Warning] Encoder checkpoint not found: {ckpt_path}, using random init.")
 
-    def _load_config(self, path):
-        if path is None or not os.path.exists(path):
-            return None
-        try:
-            with open(path, "r") as f:
-                if path.endswith(".json"):
-                    import json
-                    return json.load(f)
-                return yaml.safe_load(f)
-        except Exception as e:
-            print(f"[Error] load_config failed: {e}")
-            return None
-
     def forward(self, input_ids):
         x = self.embedding(input_ids)
         x = self.encoder_layers(x)
         return x.mean(dim=1)
+
+# =============================================
+# 🧬 AMix Mutation Model (ESM2-compatible wrapper)
+# =============================================
+class AMixMutationModel(nn.Module):
+    """
+    AMix wrapper that provides ESM2-compatible interface for mutation model.
+    Implements tokenize(), decode(), and forward() methods compatible with
+    the Directed Evolution framework.
+    """
+    def __init__(self, ckpt_path, config_path=None, device=None):
+        super().__init__()
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # -------- Load configuration --------
+        self.config = load_model_config(config_path)
+        if self.config is None:
+            print(f"[Warning] config not found or invalid at {config_path}, using defaults.")
+            self.config = {"hidden_dim": 1280, "num_layers": 12, "vocab_size": 30, "dropout": 0.1}
+        else:
+            # Handle nested config structure from AMix
+            if 'model' in self.config and 'bfn' in self.config['model']:
+                bfn_config = self.config['model']['bfn']
+                if 'net' in bfn_config and 'config' in bfn_config['net']:
+                    self.config = bfn_config['net']['config']
+        
+        # Get dimensions from config (handle both naming conventions)
+        hidden_dim = self.config.get("hidden_size", self.config.get("hidden_dim", 1280))
+        vocab_size = self.config.get("vocab_size", 30)
+        num_layers = self.config.get("num_hidden_layers", self.config.get("num_layers", 12))
+        num_heads = self.config.get("num_attention_heads", self.config.get("nhead", 8))
+        
+        print(f"[AMixMutationModel] Initializing with hidden_dim={hidden_dim}, num_layers={num_layers}, num_heads={num_heads}")
+        
+        # -------- AMix amino acid mapping --------
+        self.amino2id = {a: i + 1 for i, a in enumerate("ACDEFGHIKLMNPQRSTVWY")}
+        self.id2amino = {i: a for a, i in self.amino2id.items()}
+        self.pad_id = 0
+        self.mask_token = "<mask>"
+        # Vocabulary structure:
+        # - Position 0: padding token
+        # - Positions 1-20: amino acids (A, C, D, E, F, G, H, I, K, L, M, N, P, Q, R, S, T, V, W, Y)
+        # - Positions 21-29: reserved (from original vocab_size=30)
+        # - Position 30 (vocab_size): mask token
+        self.mask_id = vocab_size
+        
+        # -------- Model architecture --------
+        # Total vocabulary size includes all positions from 0 to vocab_size (inclusive)
+        self.total_vocab_size = vocab_size + 1
+        self.embedding = nn.Embedding(self.total_vocab_size, hidden_dim, padding_idx=self.pad_id)
+        self.encoder_layers = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(d_model=hidden_dim, nhead=num_heads, batch_first=True),
+            num_layers=num_layers
+        )
+        
+        # Linear layer for logits (tied to embedding weights)
+        self.lm_head = nn.Linear(hidden_dim, self.total_vocab_size, bias=False)
+        
+        self.to(self.device)
+        
+        # -------- Load checkpoint --------
+        if ckpt_path and os.path.exists(ckpt_path):
+            try:
+                checkpoint = torch.load(ckpt_path, map_location=self.device)
+                if "state_dict" in checkpoint:
+                    processed_state_dict = {k.replace("model.", ""): v for k, v in checkpoint["state_dict"].items()}
+                else:
+                    processed_state_dict = checkpoint
+                self.load_state_dict(processed_state_dict, strict=False)
+                print(f">> Loaded AMixMutationModel weights from {ckpt_path}")
+            except Exception as e:
+                print(f"[Warning] Failed to load checkpoint: {e}")
+        else:
+            print(f"[Warning] Checkpoint not found: {ckpt_path}, using random init.")
+        
+        # Make self act as tokenizer for compatibility
+        self.tokenizer = self
+    
+    def tokenize(self, inputs: List[str]):
+        """
+        Tokenize sequences to be compatible with ESM2 interface.
+        Returns a dict with 'input_ids' and 'attention_mask'.
+        """
+        if not inputs:
+            # Handle empty input list
+            return {
+                "input_ids": torch.empty((0, 0), dtype=torch.long, device=self.device),
+                "attention_mask": torch.empty((0, 0), dtype=torch.long, device=self.device)
+            }
+        
+        # First, we need to determine the max length in terms of tokens (not chars)
+        token_sequences = []
+        for seq in inputs:
+            ids = []
+            i = 0
+            while i < len(seq):
+                # Check if current position starts with mask token
+                if seq[i:i+len(self.mask_token)] == self.mask_token:
+                    ids.append(self.mask_id)
+                    i += len(self.mask_token)
+                else:
+                    # Use pad_id for unknown amino acids (silent fallback for compatibility)
+                    ids.append(self.amino2id.get(seq[i], self.pad_id))
+                    i += 1
+            token_sequences.append(ids)
+        
+        # Handle case where all sequences are empty
+        max_len = max((len(ids) for ids in token_sequences), default=0)
+        if max_len == 0:
+            max_len = 1  # Ensure at least 1 position for empty sequences
+        
+        input_ids = torch.full((len(inputs), max_len), fill_value=self.pad_id, 
+                              dtype=torch.long, device=self.device)
+        attention_mask = torch.zeros((len(inputs), max_len), dtype=torch.long, device=self.device)
+        
+        for i, ids in enumerate(token_sequences):
+            if len(ids) > 0:
+                input_ids[i, :len(ids)] = torch.tensor(ids, dtype=torch.long, device=self.device)
+                attention_mask[i, :len(ids)] = 1
+        
+        # Return BatchEncoding-like dict
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask
+        }
+    
+    def decode(self, tokens: torch.Tensor) -> List[str]:
+        """
+        Decode token IDs back to sequences.
+        Compatible with ESM2's batch_decode interface.
+        """
+        if tokens.dim() == 1:
+            tokens = tokens.unsqueeze(0)
+        
+        sequences = []
+        for row in tokens:
+            seq = []
+            for token_id in row.tolist():
+                if token_id == self.pad_id:
+                    continue
+                elif token_id == self.mask_id:
+                    seq.append(self.mask_token)
+                else:
+                    seq.append(self.id2amino.get(token_id, ''))
+            sequences.append(''.join(seq))
+        
+        return sequences
+    
+    def forward(self, inputs):
+        """
+        Forward pass returning ESM2-compatible output.
+        Returns an object with 'logits' and 'hidden_states' attributes.
+        """
+        if isinstance(inputs, dict):
+            input_ids = inputs["input_ids"]
+        else:
+            input_ids = inputs
+        
+        input_ids = input_ids.to(self.device)
+        
+        # Get embeddings and encode
+        x = self.embedding(input_ids)  # [B, L, D]
+        hidden_states = self.encoder_layers(x)  # [B, L, D]
+        
+        # Get logits for each position
+        logits = self.lm_head(hidden_states)  # [B, L, V]
+        
+        # Return object with logits and hidden_states attributes (like MaskedLMOutput)
+        return AMixOutput(logits, hidden_states)
 
 # =============================================
 # 🧬 AMix Decoder
@@ -144,18 +336,24 @@ class AMixFitnessWrapper:
         out = out.detach().cpu().numpy().reshape(len(seqs), -1)
         return out[:, 0] if out.shape[1] == 1 else out
 
-    # 让接口和 DE 框架兼容
+    # Make interface compatible with DE framework
     predict_fitness = predict
     infer_fitness = predict
     __call__ = predict
 
 # =============================================
-# 初始化模块
+# Initialization functions
 # =============================================
 def initialize_mutation_model(args, device):
-    model = ESM2(pretrained_model_name_or_path=args.pretrained_mutation_name)
-    tokenizer = model.tokenizer
-    model.to(device).eval()
+    # Use AMixMutationModel instead of ESM2 for compatibility
+    encoder_config = getattr(args, "encoder_config", None)
+    model = AMixMutationModel(
+        ckpt_path=args.encoder_ckpt_path or args.decoder_ckpt_path,
+        config_path=encoder_config,
+        device=device
+    )
+    model.eval()
+    tokenizer = model.tokenizer  # AMixMutationModel provides its own tokenizer interface
     return model, tokenizer
 
 def initialize_maskers(args):
@@ -201,7 +399,7 @@ def initialize_fitness_predictor(args, device):
     return AMixFitnessWrapper(amix_module, device=device)
 
 # =============================================
-# CSV 结果保存
+# Save results to CSV
 # =============================================
 def save_results(wt_seqs, mutants, score, valid_score, output_path):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -210,7 +408,7 @@ def save_results(wt_seqs, mutants, score, valid_score, output_path):
     df.to_csv(output_path, index=False)
 
 # =============================================
-# 主逻辑
+# Main logic
 # =============================================
 def main(args):
     set_seed(args.seed) if args.set_seed_only else enable_full_deterministic(args.seed)
@@ -259,7 +457,7 @@ def main(args):
     print(f">> Results saved to {filepath}")
 
 # =============================================
-# 参数解析
+# Argument parsing
 # =============================================
 def parse_args():
     parser = argparse.ArgumentParser(description="Run Discrete Directed Evolution with AMix decoder checkpoint")
